@@ -326,12 +326,15 @@ class CleanerBot:
                 deleted = context.bot.delete_message(chat_id=chat_id, message_id=message_entity.message_id)
             except Unauthorized:
                 # most likely bot has been kicked or chat is deleted
-                logger.info(f"Got 'Unauthorised' exception during a message deletion. Stopping deletion job.")
+                logger.error(f"Got 'Unauthorised' exception during a message deletion. Stopping deletion job.")
                 unauthorized = True
                 break
             except:
-                # TODO shoould we add some praticular exceptions handling here, like BadReuest (could be triggered if there is no rights for deletion) or Unauthorized (removed from the chat)
-                logger.info(f"Failed to perform message deletion API call for the following message: {message_entity}.")
+                # TODO should we add some praticular exceptions handling here, like BadReuest (could be triggered if there is no rights for deletion) or Unauthorized (removed from the chat)
+                exception = sys.exc_info()
+                logger.error(f"Failed to perform message deletion API call for the following message: {message_entity}. {exception[0]}")
+                traceback.print_exc()
+                
             
             if deleted:
                 deleted_messages.append(message_entity)
