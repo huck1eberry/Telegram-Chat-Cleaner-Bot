@@ -140,8 +140,7 @@ class CleanerBot:
             webhook: Webhook = self._config.webhook
             logger.info(f"Starting the following webhook: {webhook}")
             bot_token = self._config.bot_token
-            self._updater.start_webhook(listen=webhook.listen, port=webhook.port, url_path=bot_token)
-            self._updater.bot.set_webhook(f"{webhook.webhook_base_url}{bot_token}")
+            self._updater.start_webhook(listen=webhook.listen, port=webhook.port, url_path=bot_token, webhook_url=f"{webhook.webhook_base_url}{bot_token}")
         else:
             logger.info("Starting polling.")
             self._updater.start_polling()
