@@ -7,6 +7,9 @@ from logging import Logger
 import sys
 from dataclasses import dataclass
 import pytz
+from telegram import message
+from bidict import bidict
+from telegram.chatinvitelink import ChatInviteLink
 
 from messages_repo import MessagesRepo, MessageEntity
 from typing import Dict, Optional, List, Set, Callable, Any
@@ -97,6 +100,10 @@ class CleanerBot:
         if 'active_groups' not in dispatcher.bot_data:
             dispatcher.bot_data['active_groups'] = set()
 
+        # setup groups joiner dicts 
+        if 'group_joiner_chats' not in dispatcher.bot_data:
+            dispatcher.bot_data['group_joiner_chats'] = bidict()
+
         # Registration of supported commands
         # NOTE: if message fileters overlap each other, only first handler will be triggered (order defines what is going to be  triggered)
         dispatcher.add_handler(CommandHandler("start", self._start))
@@ -104,6 +111,9 @@ class CleanerBot:
         dispatcher.add_handler(CommandHandler("version", self._version))
         dispatcher.add_handler(CommandHandler("restrictions", self._restrictions))
         dispatcher.add_handler(CommandHandler("bot_data", self._bot_data))
+        #group joiner functionality
+        dispatcher.add_handler(CommandHandler("setup_join_config", self._setup_join_config))
+        dispatcher.add_handler(CommandHandler("join", self._join))
         # actual wiping-related functionality
         dispatcher.add_handler(MessageHandler(Filters.status_update.chat_created, self._chat_created))
         dispatcher.add_handler(MessageHandler(Filters.status_update.new_chat_members, self._user_added))
@@ -154,10 +164,17 @@ class CleanerBot:
         """Retieves 'active groups' set from the 'bot_data' dictionary that is persisted by the bot (see bot iniitalisation)"""
         return self._updater.dispatcher.bot_data['active_groups']
 
+    @property
+    def _group_joiner_chats(self) -> bidict[int, str]:
+        """Retieves 'group joiner chats' dict (chat_id to chat_name) from the 'bot_data' dictionary that is persisted by the bot (see bot iniitalisation)"""
+        return self._updater.dispatcher.bot_data['group_joiner_chats']
+
     def _abandon_chat(self, chat_id: int) -> None:
         """Handle all possible situations when the bot can't work with a chat (when getting kicked or chat is deleted, for exammple)"""
         self._active_groups.discard(chat_id)
         self._messages_repo.delete_chat_messages(chat_id=chat_id)
+        if chat_id in self._group_joiner_chats:
+            del self._group_joiner_chats[chat_id]
 
     def _send_status_message(self, chat_id: int, text: str, *args, **kwargs) -> Message:
         """Use this method to send cleanup status messages. Here we can properly react to possible Unauthorized exceptions (for instance when chat is deleted ot got kicked)"""
@@ -252,14 +269,69 @@ class CleanerBot:
     @Decorators.keep_callback_messages
     def _bot_data(self, update: Update, context: CallbackContext) -> Message:
         """Internal command. Send all 'bot_data' content back to the chat"""
-        bot_data : str = str(context.bot_data)
+        bot_data: str = str(context.bot_data)
         return update.message.reply_text(text=bot_data, reply_to_message_id=update.message.message_id)
 
-    @Decorators.log_messages # TODO remove this, when the deletion issue will be fixed
+    @Decorators.log_messages
     @Decorators.keep_callback_messages
     def _receive_incoming_message(self, update: Update, context: CallbackContext) -> None:
         """Simple callback that receives and stores it's message."""
         pass
+
+    # joining-related handlers
+    # TODO rework & refactor all join funct
+    @Decorators.log_messages
+    @Decorators.keep_callback_messages
+    def _setup_join_config(self, update: Update, context: CallbackContext) -> Message:
+        """Adds join mapping for the group."""
+        message: Message = update.message
+        chat_id = message.chat_id
+        if message.chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
+            return message.reply_text('This command is not supposed to work here.')
+
+        command_segments: List[str] = message.text.split()
+        if len(command_segments) >= 2:
+            command_length: int = len(command_segments[0])
+            message_length: int = len(message.text)
+            chat_name: str = message.text[command_length:message_length].strip()
+            is_taken: bool = chat_name in self._group_joiner_chats.inverse
+            if is_taken:
+                name_owner_id: int = self._group_joiner_chats.inverse[chat_name]
+                if name_owner_id != chat_id:
+                    return update.message.reply_text(text=f"'{chat_name}' is already taken. Please, use something else.", reply_to_message_id=update.message.message_id)
+
+            overriding: bool = chat_id in self._group_joiner_chats
+            self._group_joiner_chats[chat_id] = chat_name   
+            if overriding:
+                return context.bot.send_message(chat_id=chat_id, text="Chat join parameters have been updated.")
+            else:
+                return context.bot.send_message(chat_id=chat_id, text="Chat join parameters have been set.")
+        else:
+            return update.message.reply_text(text=f"Not enough arguments.", reply_to_message_id=update.message.message_id)
+
+    @Decorators.keep_callback_messages
+    def _join(self, update: Update, context: CallbackContext) -> Message:
+        """Join the group."""
+        message: Message = update.message
+        command_segments: List[str] = message.text.split()
+        if len(command_segments) >= 2:
+            command_length: int = len(command_segments[0])
+            message_length: int = len(message.text)
+            chat_name: str = message.text[command_length:message_length].strip()
+            if chat_name in self._group_joiner_chats.inverse:
+                joining_chat_id = self._group_joiner_chats.inverse[chat_name]
+                try:
+                    expire_date: datetime = datetime.utcnow() + timedelta(seconds=60)
+                    invite_link: ChatInviteLink = context.bot.create_chat_invite_link(chat_id=joining_chat_id, expire_date=expire_date)
+                    update.message.reply_text(text=f"Here is your invite link: {invite_link.invite_link}", reply_to_message_id=update.message.message_id) 
+                except BadRequest:
+                    logger.error(f"Got 'BadRequest' exception during invite link creation. Most likely due to 'missing rights'.")
+                    update.message.reply_text(text=f"Failed to create the link.", reply_to_message_id=update.message.message_id)  
+            else:
+                return update.message.reply_text(text=f"Can't find the chat.", reply_to_message_id=update.message.message_id)
+
+        else:
+            return update.message.reply_text(text=f"Not enough arguments.", reply_to_message_id=update.message.message_id)
 
     # wiping-related handlers  
     def _chat_migrated(self, update: Update, context: CallbackContext) -> None: 
